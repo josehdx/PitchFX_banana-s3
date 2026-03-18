@@ -1,3 +1,6 @@
+//adding feedbacker
+
+
 #pragma GCC optimize ("O3")
 #include <Arduino.h>
 #include <Control_Surface.h>
@@ -26,6 +29,7 @@ volatile float pitchShiftFactor = 1.0;
 volatile bool isFrozen = false;
 float frozenMag[SAMPLES / 2] = {0};
 
+StreamBufferHandle_t i2s_out_buffer;
 
 // --- MIDI & Full Calibration Suite (Core 0) ---
 pin_t pinPB = A13;
@@ -37,10 +41,6 @@ bool lastButtonState = HIGH;
 bool lastIntervalButtonState = HIGH;
 unsigned long intervalButtonPressedTime = 0;
 float maxSemitones = 0.0f;
-
-const int HARMONY_BUTTON_PIN = 18; 
-bool lastHarmonyButtonState = HIGH;
-volatile bool isHarmonizerMode = false; 
 
 volatile float feedbackRamp = 0.0f;
 
@@ -129,6 +129,9 @@ void debugPrint() {
   Serial.print(potPB.getValue()); Serial.print("\t");
   */
   
+  // Custom addition to monitor the new Ring Buffer health
+  // Serial.print("Free Buffer: "); Serial.print(xStreamBufferSpacesAvailable(i2s_out_buffer));
+  
   Serial.println();
 }
 
@@ -149,22 +152,6 @@ inline float IRAM_ATTR fast_mag(float re, float im) {
     dsps_wind_hann_f32(window_coefficients, SAMPLES);
 
     for(;;) {
-
-        // --- . AUDIO INPUT (I2S READ) ---
-        // Shift the old data down to make room for the new chunk
-        memmove(fft_buffer, &fft_buffer[HOP_SIZE * 2], (SAMPLES - HOP_SIZE) * 2 * sizeof(float));
-
-        // Read new audio from the hardware 
-        int16_t in_block[HOP_SIZE];
-        size_t bytes_read;
-        i2s_read(I2S_NUM_0, in_block, sizeof(in_block), &bytes_read, portMAX_DELAY);
-
-        // Convert hardware audio to float for the DSP math
-        for (int i = 0; i < HOP_SIZE; i++) {
-            fft_buffer[(SAMPLES - HOP_SIZE + i) * 2] = (float)in_block[i] / 32768.0f; 
-            fft_buffer[(SAMPLES - HOP_SIZE + i) * 2 + 1] = 0.0f; 
-        }
-
         // VECTORIZED WINDOWING
         dsps_mul_f32(fft_buffer, window_coefficients, fft_buffer, SAMPLES, 2, 1, 2);
         for (int i = 0; i < SAMPLES; i++) { fft_buffer[i * 2 + 1] = 0; }
@@ -221,43 +208,29 @@ inline float IRAM_ATTR fast_mag(float re, float im) {
                 prevAnalysisPhase[i] = phase;
             }
             
-            // --- SYNTHESIS PATH 1: Main Audio (Dry or Shifted) ---
-            // If Harmonizer is ON, lock the main audio to 1.0 (Dry). Otherwise, use the expression pedal.
-            float mainFactor = isHarmonizerMode ? 1.0f : pitchShiftFactor;
-            int targetBin = roundf(i * mainFactor);
-            
+            // --- SYNTHESIS PATH 1: Main Audio (Live or Frozen) ---
+            int targetBin = roundf(i * pitchShiftFactor);
             if (targetBin < SAMPLES / 2) {
                 newMag[targetBin] += isFrozen ? frozenMag[i] : liveMag;
-                float shiftedFreq = (binFreq + deltaPhase / HOP_SIZE) * mainFactor;
+                float shiftedFreq = (binFreq + deltaPhase / HOP_SIZE) * pitchShiftFactor;
                 newPhase[targetBin] = prevSynthesisPhase[targetBin] + (shiftedFreq * HOP_SIZE);
                 prevSynthesisPhase[targetBin] = newPhase[targetBin];
             }
 
-            // --- SYNTHESIS PATH 2: Auto-Feedbacker ---
+            // --- SYNTHESIS PATH 2: Auto-Feedbacker (Adds harmonic on top) ---
             if (feedbackRamp > 0.0f) {
+                // Pitch glides up smoothly to +1 Octave (Factor of 2.0)
                 float fbFactor = pitchShiftFactor * (1.0f + feedbackRamp); 
                 int fbTargetBin = roundf(i * fbFactor);
                 
                 if (fbTargetBin < SAMPLES / 2) {
+                    // Volume fades in based on the ramp
                     newMag[fbTargetBin] += (frozenMag[i] * feedbackRamp); 
+                    
+                    // Smooth synth phase for the feedback harmonic
                     float fbShiftedFreq = (binFreq * fbFactor);
                     newPhase[fbTargetBin] = prevSynthesisPhase[fbTargetBin] + (fbShiftedFreq * HOP_SIZE);
                     prevSynthesisPhase[fbTargetBin] = newPhase[fbTargetBin];
-                }
-            }
-
-          // --- SYNTHESIS PATH 3: Polyphonic Harmonizer ---
-            // Runs if Harmony mode is ON and the pedal is moved from center (UP or DOWN)
-            if (isHarmonizerMode && fabsf(pitchShiftFactor - 1.0f) > 0.001f) {
-                int harmTargetBin = roundf(i * pitchShiftFactor);
-                
-                if (harmTargetBin < SAMPLES / 2) {
-                    // Mix the harmony voice in at 100% volume
-                    newMag[harmTargetBin] += isFrozen ? frozenMag[i] : liveMag; 
-                    
-                    float harmShiftedFreq = (binFreq + deltaPhase / HOP_SIZE) * pitchShiftFactor;
-                    newPhase[harmTargetBin] = prevSynthesisPhase[harmTargetBin] + (harmShiftedFreq * HOP_SIZE);
-                    prevSynthesisPhase[harmTargetBin] = newPhase[harmTargetBin];
                 }
             }
         }
@@ -294,14 +267,18 @@ inline float IRAM_ATTR fast_mag(float re, float im) {
         // 4. Clear the tail end of the OLA buffer
         memset(&ola_buffer[SAMPLES - HOP_SIZE], 0, HOP_SIZE * sizeof(float));
 
-    
+        // --- OUTPUT TO CIRCULAR BUFFER ---
+        // Send the entire HOP_SIZE block at once
+        xStreamBufferSend(i2s_out_buffer, out_block, sizeof(out_block), 0);
 
         // --- I2S HARDWARE OUTPUT ---
-        // Write the finished audio block directly to the DAC
+        // Read out exactly one HOP_SIZE block to the I2S hardware
         size_t bw;
-        i2s_write(I2S_NUM_0, out_block, sizeof(out_block), &bw, portMAX_DELAY);
+        int16_t play_block[HOP_SIZE];
+        if (xStreamBufferReceive(i2s_out_buffer, play_block, sizeof(play_block), 0) > 0) {
+            i2s_write(I2S_NUM_0, play_block, sizeof(play_block), &bw, portMAX_DELAY);
+        }
     }
-    
 }
 
 // --- CORE 0: MIDI & ADVANCED CONTROL ---
@@ -310,7 +287,7 @@ void MidiTask(void * pvParameters) {
     for(;;) {
         Control_Surface.loop();
         
-        // --- FREEZE BUTTON LOGIC ---
+        // --- 1. FREEZE BUTTON LOGIC ---
         bool currentButtonState = digitalRead(FREEZE_BUTTON_PIN);
         
         if (currentButtonState == LOW && lastButtonState == HIGH) {
@@ -323,20 +300,6 @@ void MidiTask(void * pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(50)); // Simple debounce delay
         }
         lastButtonState = currentButtonState;
-
-
-        // --- HARMONY MODE TOGGLE ---
-        bool currentHarmonyState = digitalRead(HARMONY_BUTTON_PIN);
-        if (currentHarmonyState == LOW && lastHarmonyButtonState == HIGH) {
-            isHarmonizerMode = !isHarmonizerMode;
-            if (isHarmonizerMode) {
-                Serial.println("HARMONY MODE ON: Dry Signal + Sweeping Harmony");
-            } else {
-                Serial.println("WHAMMY MODE ON: Pitch Bend Only");
-            }
-            vTaskDelay(pdMS_TO_TICKS(50)); // Debounce
-        }
-        lastHarmonyButtonState = currentHarmonyState;
 
 
         // --- 2. INTERVAL BUTTON LOGIC (Short vs Long Press) ---
@@ -365,8 +328,6 @@ void MidiTask(void * pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(50)); // Debounce
         }
         
-        lastIntervalButtonState = currentIntervalButtonState;
-
         // --- 3. AUTO-FEEDBACKER ENVELOPE ---
         // Momentary action: only active while your foot is holding it down
         bool currentFbState = digitalRead(FEEDBACK_BUTTON_PIN);
@@ -378,7 +339,8 @@ void MidiTask(void * pvParameters) {
             feedbackRamp -= 0.02f; // Fade out release (approx 250ms decay)
             if (feedbackRamp < 0.0f) feedbackRamp = 0.0f;
         }
-    
+        
+        lastIntervalButtonState = currentIntervalButtonState;
 
 
         // --- 4. WHAMMY POTENTIOMETER LOGIC ---
@@ -432,7 +394,6 @@ void setup() {
     pinMode(FREEZE_BUTTON_PIN, INPUT_PULLUP);
     pinMode(INTERVAL_BUTTON_PIN, INPUT_PULLUP);
     pinMode(FEEDBACK_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(HARMONY_BUTTON_PIN, INPUT_PULLUP);
     FilteredAnalog<>::setupADC();
     potPB.map(map_PB_Full);
     Control_Surface >> pipes >> btmidi;
@@ -441,24 +402,18 @@ void setup() {
     
     calibrateCenterAndDeadzone();
 
+    i2s_out_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE, sizeof(int16_t));
 
     i2s_config_t i2c = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = SAMPLING_FREQUENCY,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .dma_buf_count = 4,
         .dma_buf_len = 64
     };
     i2s_driver_install(I2S_NUM_0, &i2c, 0, NULL);
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = 14,   // Replace with your BCLK pin
-        .ws_io_num = 15,    // Replace with your LRCK/WS pin
-        .data_out_num = 16, // Replace with your DAC Data pin
-        .data_in_num = 17   // Replace with your ADC Data pin
-    };
-    i2s_set_pin(I2S_NUM_0, &pin_config);
 
     xTaskCreatePinnedToCore(MidiTask, "Midi", 8192, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(AudioDSPTask, "DSP", 16384, NULL, 2, NULL, 1);
