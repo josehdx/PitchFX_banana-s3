@@ -1,3 +1,4 @@
+//ESP-DSP vectorized windowing (dsps_mul_f32) and the FreeRTOS StreamBuffer logic to eliminate audio crackling.
 #include <Arduino.h>
 #include <Control_Surface.h>
 #include <dsps_fft2r.h>   
@@ -212,7 +213,7 @@ void MidiTask(void * pvParameters) {
 
         pitchShiftFactor = powf(2.0f, (float(calibratedMidi) - 8192.0f) / 8192.0f);
         
-        //debugPrint();
+        debugPrint();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
