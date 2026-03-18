@@ -3,6 +3,9 @@
 #include <dsps_fft2r.h>   
 #include <dsps_wind.h>
 #include <driver/i2s.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
+#include "dsps_mul.h"
 
 // --- GitHub Configuration & Constants ---
 #define SAMPLES 1024             
@@ -10,6 +13,7 @@
 #define SAMPLING_FREQUENCY 44100 
 #define SERIAL_BAUDRATE 115200
 #define FORCE_CENTER_UPDATE_DELAY 250
+#define STREAM_BUFFER_SIZE (SAMPLES * 4 * sizeof(int16_t)) 
 
 // --- Global DSP Buffers (Core 1) ---
 float fft_buffer[SAMPLES * 2] __attribute__((aligned(16))); 
@@ -17,6 +21,8 @@ float window_coefficients[SAMPLES];
 float prevAnalysisPhase[SAMPLES / 2];
 float prevSynthesisPhase[SAMPLES / 2];
 volatile float pitchShiftFactor = 1.0; 
+
+StreamBufferHandle_t i2s_out_buffer;
 
 // --- MIDI & Full Calibration Suite (Core 0) ---
 pin_t pinPB = A13; 
@@ -40,7 +46,7 @@ long PBlastCenteredOn = millis();
 static bool lockedAtMin = false;
 static bool lockedAtMax = false;
 
-// --- Full Mapping Logic with GitHub Serial Lines ---
+// --- Full Mapping Logic ---
 analog_t map_PB_Full(analog_t raw) {
     raw = constrain(raw, PBminimumValue, PBmaximumValue);
     
@@ -88,14 +94,10 @@ void calibrateCenterAndDeadzone() {
   Serial.print("PB Deadzone (Constrained/Value Used): "); Serial.println(PBdeadzone);
 }
 
-
-
 // --- GitHub debugPrint() - Fully Restored ---
 void debugPrint() {
-
     //Serial.print("Factor: "); Serial.print(pitchShiftFactor); Serial.print("\t");
-  /* 
-  Serial.print("AR: ");
+  /* Serial.print("AR: ");
   Serial.print(analogRead(pinPB)); Serial.print("\t");
   Serial.print("PB Min/Cen/Max/Range/DZ: ");
   Serial.print(PBminimumValue); Serial.print(" ");
@@ -108,21 +110,24 @@ void debugPrint() {
   Serial.print(potPB.getRawValue());  Serial.print("\t");
   Serial.print(potPB.getValue()); Serial.print("\t");
   */
+  
+  // Custom addition to monitor the new Ring Buffer health
+  // Serial.print("Free Buffer: "); Serial.print(xStreamBufferSpacesAvailable(i2s_out_buffer));
+  
   Serial.println();
 }
 
-
-
 // --- CORE 1: PHASE-LOCKED DSP TASK ---
 void AudioDSPTask(void * pvParameters) {
-    dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    esp_err_t ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret != ESP_OK) { vTaskDelete(NULL); }
+    
     dsps_wind_hann_f32(window_coefficients, SAMPLES);
 
     for(;;) {
-        for (int i = 0; i < SAMPLES; i++) {
-            fft_buffer[i * 2] *= window_coefficients[i]; 
-            fft_buffer[i * 2 + 1] = 0; 
-        }
+        // VECTORIZED WINDOWING
+        dsps_mul_f32(fft_buffer, window_coefficients, fft_buffer, SAMPLES, 2, 1, 2);
+        for (int i = 0; i < SAMPLES; i++) { fft_buffer[i * 2 + 1] = 0; }
 
         dsps_fft2r_fc32(fft_buffer, SAMPLES);
         dsps_bit_rev2r_fc32(fft_buffer, SAMPLES);
@@ -130,6 +135,7 @@ void AudioDSPTask(void * pvParameters) {
         float newMag[SAMPLES / 2] = {0}, newPhase[SAMPLES / 2] = {0};
         int lastPeak = 0;
 
+        // FPU Math Loop for Phase-Locking
         for (int i = 1; i < (SAMPLES / 2) - 1; i++) {
             float re = fft_buffer[i * 2], im = fft_buffer[i * 2 + 1];
             float mag = sqrtf(re*re + im*im), phase = atan2f(im, re);
@@ -158,9 +164,16 @@ void AudioDSPTask(void * pvParameters) {
         dsps_fft2r_fc32(fft_buffer, SAMPLES);
         dsps_bit_rev2r_fc32(fft_buffer, SAMPLES);
 
+        // Circular Buffer Write
+        int16_t outSample = (int16_t)(fft_buffer[0] * 32767);
+        xStreamBufferSend(i2s_out_buffer, &outSample, sizeof(int16_t), 0);
+
+        // I2S Hardware Output
         size_t bw;
-        int16_t out = (int16_t)(fft_buffer[0] * 32767);
-        i2s_write(I2S_NUM_0, &out, sizeof(out), &bw, portMAX_DELAY);
+        int16_t playSample;
+        if (xStreamBufferReceive(i2s_out_buffer, &playSample, sizeof(int16_t), 0) > 0) {
+            i2s_write(I2S_NUM_0, &playSample, sizeof(int16_t), &bw, portMAX_DELAY);
+        }
     }
 }
 
@@ -215,6 +228,8 @@ void setup() {
     Control_Surface.begin();
     
     calibrateCenterAndDeadzone();
+
+    i2s_out_buffer = xStreamBufferCreate(STREAM_BUFFER_SIZE, sizeof(int16_t));
 
     i2s_config_t i2c = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
