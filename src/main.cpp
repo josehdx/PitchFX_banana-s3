@@ -359,7 +359,7 @@ void MidiTask(void * pvParameters) {
             } else {
                 // Long Press (>= 1 second): Decrement by 0.5 semitones
                 maxSemitones -= 0.5f;
-                if (maxSemitones < 0.0f) maxSemitones = 0.0f; // Min 0 (No shift)
+                if (maxSemitones < -24.0f) maxSemitones = -24.0f; // Min 0 (No shift)
                 Serial.print("Interval Down: +/- "); Serial.println(maxSemitones);
             }
             vTaskDelay(pdMS_TO_TICKS(50)); // Debounce
