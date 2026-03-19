@@ -50,7 +50,7 @@ volatile bool isHarmonizerMode = false;
 
 volatile float feedbackRamp = 0.0f;
 
-const int CAPO_BUTTON_PIN = 19;
+const int CAPO_BUTTON_PIN = 7;
 bool lastCapoButtonState = HIGH;
 volatile bool isCapoMode = false;
 float capoSemitones = -2.0f; // Set your fixed Capo interval here
@@ -478,6 +478,11 @@ void MidiTask(void * pvParameters) {
 
 void setup() {
     Serial.begin(SERIAL_BAUDRATE);
+
+    delay(3000); 
+    Serial.println("--- SYSTEM BOOTING ---");
+
+    
     btmidi.setName("Whammy_S3");
     pinMode(FREEZE_BUTTON_PIN, INPUT_PULLUP);
     pinMode(INTERVAL_BUTTON_PIN, INPUT_PULLUP);
