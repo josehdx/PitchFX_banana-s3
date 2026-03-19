@@ -14,7 +14,7 @@ float pitchShiftLUT[16384]; // 64KB array to hold all possible pedal multipliers
 
 // --- GitHub Configuration & Constants ---
 #define SAMPLES 512             
-#define HOP_SIZE 128             
+#define HOP_SIZE 64            
 #define SAMPLING_FREQUENCY 96000 
 #define SERIAL_BAUDRATE 115200
 #define FORCE_CENTER_UPDATE_DELAY 250
