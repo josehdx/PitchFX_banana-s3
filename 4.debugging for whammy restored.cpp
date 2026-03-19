@@ -19,7 +19,7 @@ float prevSynthesisPhase[SAMPLES / 2];
 volatile float pitchShiftFactor = 1.0; 
 
 // --- MIDI & Full Calibration Suite (Core 0) ---
-pin_t pinPB = 1; 
+pin_t pinPB = A0; 
 BluetoothMIDI_Interface btmidi;
 USBMIDI_Interface usbmidi;
 MIDI_PipeFactory<2> pipes;

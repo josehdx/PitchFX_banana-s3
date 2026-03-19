@@ -28,7 +28,7 @@ float frozenMag[SAMPLES / 2] = {0};
 
 
 // --- MIDI & Full Calibration Suite (Core 0) ---
-pin_t pinPB = A13;
+pin_t pinPB = A0;
 const int FREEZE_BUTTON_PIN = 0; // Set this to your desired GPIO (e.g., 0, 4, or 5)
 const int INTERVAL_BUTTON_PIN = 4;
 const int FEEDBACK_BUTTON_PIN = 5;

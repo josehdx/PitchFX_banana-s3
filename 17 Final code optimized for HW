@@ -1,3 +1,4 @@
+//Full opt on github
 #pragma GCC optimize ("O3")
 #include <Arduino.h>
 #include <Control_Surface.h>
@@ -35,22 +36,22 @@ QueueHandle_t i2s_event_queue;
 
 // --- MIDI & Full Calibration Suite (Core 0) ---
 pin_t pinPB = A0;
-const int FREEZE_BUTTON_PIN = 2; // Set this to your desired GPIO (e.g., 0, 4, or 5)
-const int INTERVAL_BUTTON_PIN = 8;
-const int FEEDBACK_BUTTON_PIN = 9;
+const int FREEZE_BUTTON_PIN = 0; // Set this to your desired GPIO (e.g., 0, 4, or 5)
+const int INTERVAL_BUTTON_PIN = 4;
+const int FEEDBACK_BUTTON_PIN = 5;
 
 bool lastButtonState = HIGH;
 bool lastIntervalButtonState = HIGH;
 unsigned long intervalButtonPressedTime = 0;
 float maxSemitones = 12.0f; // Defaults to +/- 1 Octave on boot
 
-const int HARMONY_BUTTON_PIN = 6; 
+const int HARMONY_BUTTON_PIN = 18; 
 bool lastHarmonyButtonState = HIGH;
 volatile bool isHarmonizerMode = false; 
 
 volatile float feedbackRamp = 0.0f;
 
-const int CAPO_BUTTON_PIN = 10;
+const int CAPO_BUTTON_PIN = 7;
 bool lastCapoButtonState = HIGH;
 volatile bool isCapoMode = false;
 float capoSemitones = -2.0f; // Set your fixed Capo interval here
@@ -59,13 +60,13 @@ BluetoothMIDI_Interface btmidi;
 USBMIDI_Interface usbmidi;
 MIDI_PipeFactory<2> pipes;
 Bank<16> bankChannel;
-FilteredAnalog<12, 2, uint32_t, uint32_t> filterPB = pinPB;
-uint16_t lastMidiSent = 8192;
+Bankable::PBPotentiometer potPB {{bankChannel, BankType::ChangeChannel}, pinPB, Channel_1};
+FilteredAnalog<12, 14, uint32_t, uint32_t> filterPB = pinPB;
 
 // Calibration Variables
-double PBdeadzoneMultiplier = 14;
-double PBdeadzoneMinimum = 950;
-double PBdeadzoneMaximum = 1600;
+double PBdeadzoneMultiplier = 2.50;
+double PBdeadzoneMinimum = 387;
+double PBdeadzoneMaximum = 539;
 analog_t PBcenter = 8192;
 analog_t PBdeadzone = PBdeadzoneMinimum;
 analog_t PBminimumValue = 0;
@@ -77,22 +78,8 @@ static bool lockedAtMax = false;
 
 // --- Full Mapping Logic ---
 analog_t map_PB_Full(analog_t raw) {
-    // raw is already 14-bit! No up-mapping needed.
     raw = constrain(raw, PBminimumValue, PBmaximumValue);
     
-    // HARD FLOOR
-    if (raw <= PBminimumValue + 150) { 
-        PBwasOffCenter = true;
-        return 0; 
-    }
-    
-    // HARD CEILING
-    if (raw >= PBmaximumValue - 150) {
-        PBwasOffCenter = true;
-        return 16383; 
-    }
-    
-    // Deadzone Math
     if (raw <= PBcenter - PBdeadzone) {
         PBwasOffCenter = true;
         return map(raw, PBminimumValue, PBcenter - PBdeadzone, 0, 8191);
@@ -102,40 +89,39 @@ analog_t map_PB_Full(analog_t raw) {
         return map(raw, PBcenter + PBdeadzone, PBmaximumValue, 8191, 16383);
     }
     else {
-        return 8192; // Solid center
+        return 8192;
     }
 }
 
 // --- GitHub Calibration Routine (All Serial Lines Restored) ---
 void calibrateCenterAndDeadzone() {
   Serial.println("Calibrating Center and Deadzones...");
+  Serial.println("Please Wait...Do Not Touch Stick!");
   
-  // WARM UP THE FILTER SO IT DOESN'T START AT 0
-  for(int i=0; i<50; i++) { filterPB.update(); delay(1); }
-
   int iNumberOfSamples = 750;
-  analog_t calibPBLow = 16383; // Start at 14-bit max
+  analog_t calibPBLow = 4095; 
   analog_t calibPBHigh = 0; 
-  long lSampleSumPB = 0;
 
+  Serial.print("Sampling center. Number of samples: "); Serial.println(iNumberOfSamples);
+  
+  long lSampleSumPB = 0;
   for (int iSample = 1; iSample <= iNumberOfSamples; iSample++) {
-    filterPB.update(); // Update the filter
-   
-    analog_t raw12 = filterPB.getValue();
-    analog_t calibPB = map(raw12, 0, 4095, 0, 16383); 
-    
+    analog_t calibPB = analogRead(pinPB); delay(1);
     lSampleSumPB += calibPB;
-    if (calibPB < calibPBLow) { calibPBLow = calibPB; } 
+    if (calibPB < calibPBLow) { calibPBLow = calibPBLow; } 
     if (calibPB > calibPBHigh) { calibPBHigh = calibPB; } 
-    delay(1);
   }
   
-  PBcenter = lSampleSumPB / iNumberOfSamples;
+  PBcenter = map((analog_t(lSampleSumPB / iNumberOfSamples)), 0, 4095, 0, 16383);
   Serial.print("PB Center: "); Serial.println(PBcenter);
 
-  // No mapping needed because it's already 14-bit
-  PBdeadzone = (analog_t)constrain(((calibPBHigh - calibPBLow) * PBdeadzoneMultiplier), PBdeadzoneMinimum, PBdeadzoneMaximum);
-  Serial.print("PB Deadzone: "); Serial.println(PBdeadzone);
+  analog_t calibPBLowMidi = map(calibPBLow, 0, 4095, 0, 16383);
+  analog_t calibPBHighMidi = map(calibPBHigh, 0, 4095, 0, 16383);
+  Serial.print("PB Low MIDI: "); Serial.println(calibPBLowMidi);
+  Serial.print("PB High MIDI: "); Serial.println(calibPBHighMidi);
+ 
+  PBdeadzone = (analog_t)constrain(((calibPBHighMidi - calibPBLowMidi) * PBdeadzoneMultiplier), PBdeadzoneMinimum, PBdeadzoneMaximum);
+  Serial.print("PB Deadzone (Constrained/Value Used): "); Serial.println(PBdeadzone);
 }
 
 
@@ -166,6 +152,8 @@ void debugPrint() {
   Serial.print(PBdeadzone); Serial.print(" ");
   Serial.print("PB OffCenter/Raw(14bit)/Val(12bit): ");
   Serial.print(PBwasOffCenter); Serial.print("\t");
+  Serial.print(potPB.getRawValue());  Serial.print("\t");
+  Serial.print(potPB.getValue()); Serial.print("\t");
   */
   
   Serial.println();
@@ -331,7 +319,7 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                 // --- VECTORIZED SIMD SCALING: Blitzes the whole array in 1 cycle ---
                 float scale = 32767.0f;
                 dsps_mul_f32(ola_buffer, &scale, ola_buffer, HOP_SIZE, 1, 0, 1);
-
+                
                 #pragma GCC unroll 4
                 for (int i = 0; i < HOP_SIZE; i++) {
                     float scaled_sample = ola_buffer[i];
@@ -446,65 +434,51 @@ void MidiTask(void * pvParameters) {
 
 
         // --- 4. WHAMMY POTENTIOMETER LOGIC ---
-        filterPB.update();
-        
-        // 1. Get the raw 12-bit hardware reading (0 to 4095)
-        analog_t raw12 = filterPB.getValue(); 
-        
-        // 2. "Stretch" it to the 14-bit MIDI scale (0 to 16383)
-        analog_t raw14 = map(raw12, 0, 4095, 0, 16383);
-        
-        // 3. Pass the stretched 14-bit value into your deadzone math
-        analog_t calibratedMidi = map_PB_Full(raw14);
+        uint32_t pb12Val = potPB.getValue(); 
+        analog_t calibratedMidi = map_PB_Full(potPB.getRawValue()); 
 
-        // Send MIDI ONLY if the pedal actually moved!
-        if (calibratedMidi != lastMidiSent) {
-            Control_Surface.sendPitchBend(Channel_1, calibratedMidi);
-            lastMidiSent = calibratedMidi;
-        }
-
-        // --- LOW BOUNDARY (HEEL DOWN) ---
-        if (calibratedMidi == 0) {
+        if (pb12Val == 0) {
             if (!lockedAtMin) {
+                Control_Surface.sendPitchBend(Channel_1, (uint16_t)0);
                 lockedAtMin = true;
                 Serial.println("[LIMIT: MIN]");
             }
         } else { lockedAtMin = false; }
 
-        // --- HIGH BOUNDARY (TOE DOWN) ---
-        if (calibratedMidi == 16383) { 
+        if (calibratedMidi == 8192 && PBwasOffCenter) {
+            if ((millis() - PBlastCenteredOn) > FORCE_CENTER_UPDATE_DELAY) {
+                Control_Surface.sendPitchBend(Channel_1, 8192);
+                PBwasOffCenter = false;
+                PBlastCenteredOn = millis();
+                Serial.println("[FORCE MIDI CENTER]");
+            }
+        }
+
+        if (pb12Val == 4095) { 
             if (!lockedAtMax) {
+                Control_Surface.sendPitchBend(Channel_1, (uint16_t)16383);
                 lockedAtMax = true;
                 Serial.println("[LIMIT: MAX]");
             }
         } else { lockedAtMax = false; }
 
-        // --- RE-CENTERING LOGIC ---
-        if (calibratedMidi == 8192 && PBwasOffCenter) {
-            PBwasOffCenter = false;
-            Serial.println("[FORCE MIDI CENTER]");
-        }
 
         // --- 5. DYNAMIC PITCH SHIFT MATH ---
         int safeIndex = constrain(calibratedMidi, 0, 16383);
-        pitchShiftFactor = pitchShiftLUT[safeIndex];
-          
+        pitchShiftFactor = pitchShiftLUT[safeIndex];       
         
-        //debugPrint();
+        debugPrint();
         vTaskDelay(pdMS_TO_TICKS(5)); // Yield to RTOS scheduler
     }
 }
 
 void setup() {
-
     Serial.begin(SERIAL_BAUDRATE);
 
-    // Wait up to 4 seconds for the Serial Monitor to physically open on the PC
-    uint32_t startWait = millis();
-    while (!Serial && (millis() - startWait < 4000));
-
+    delay(3000); 
     Serial.println("--- SYSTEM BOOTING ---");
 
+    
     btmidi.setName("Whammy_S3");
     pinMode(FREEZE_BUTTON_PIN, INPUT_PULLUP);
     pinMode(INTERVAL_BUTTON_PIN, INPUT_PULLUP);
@@ -512,14 +486,12 @@ void setup() {
     pinMode(HARMONY_BUTTON_PIN, INPUT_PULLUP);
     pinMode(CAPO_BUTTON_PIN, INPUT_PULLUP);
     FilteredAnalog<>::setupADC();
+    potPB.map(map_PB_Full);
     Control_Surface >> pipes >> btmidi;
     Control_Surface >> pipes >> usbmidi;
     Control_Surface.begin();
     
     calibrateCenterAndDeadzone();
-    
-    Control_Surface.sendPitchBend(Channel_1, 8192);
-    lastMidiSent = 8192;
 
 
     i2s_config_t i2c = {
@@ -531,26 +503,19 @@ void setup() {
         .dma_buf_count = 4,
         .dma_buf_len = HOP_SIZE
     };
-
-
     i2s_driver_install(I2S_NUM_0, &i2c, 4, &i2s_event_queue);
-
     i2s_pin_config_t pin_config = {
         .bck_io_num = 14,   // Replace with your BCLK pin
         .ws_io_num = 15,    // Replace with your LRCK/WS pin
         .data_out_num = 16, // Replace with your DAC Data pin
         .data_in_num = 17   // Replace with your ADC Data pin
     };
-
-
     i2s_set_pin(I2S_NUM_0, &pin_config);
     initTrigLUT();
     updateLUT();
 
     xTaskCreatePinnedToCore(MidiTask, "Midi", 8192, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(AudioDSPTask, "DSP", 16384, NULL, configMAX_PRIORITIES - 1, NULL, 1);
-
-}
-
+    xTaskCreatePinnedToCore(AudioDSPTask, "DSP", 16384, NULL, configMAX_PRIORITIES - 1, NULL, 1);}
     void loop() {
-    }
+    
+}
