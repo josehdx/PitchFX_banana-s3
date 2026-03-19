@@ -490,4 +490,6 @@ void setup() {
     xTaskCreatePinnedToCore(AudioDSPTask, "DSP", 16384, NULL, 2, NULL, 1);
 }
 
-void loop() {}
+void loop() {
+    
+}
