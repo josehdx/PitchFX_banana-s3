@@ -725,21 +725,12 @@ void MidiTask(void * pvParameters) {
         filterPB.update();
         filterPB2.update();
 
-// --- DIRECT MAPPING (With Hardware Margins) ---
+        // --- DIRECT MAPPING (No Center/Deadzone math) ---
         analog_t raw12_A = filterPB.getValue();
         analog_t raw12_B = filterPB2.getValue();
 
-        // Shave ~40 units off the top and bottom to guarantee we hit the absolute limits
-        const int ADC_MIN = 40;   
-        const int ADC_MAX = 4055; 
-
-        // Constrain the raw read first, so it never goes outside our new safe margins
-        analog_t constrained_A = constrain(raw12_A, ADC_MIN, ADC_MAX);
-        analog_t constrained_B = constrain(raw12_B, ADC_MIN, ADC_MAX);
-
-        // Map the newly constrained range to the full 14-bit MIDI scale
-        analog_t calibratedA = map(constrained_A, ADC_MIN, ADC_MAX, 0, 16383);
-        analog_t calibratedB = map(constrained_B, ADC_MIN, ADC_MAX, 0, 16383);
+        analog_t calibratedA = map(raw12_A, 0, 4095, 0, 16383);
+        analog_t calibratedB = map(raw12_B, 0, 4095, 0, 16383);
 
         currentPB1 = calibratedA;
         currentPB2 = calibratedB;
