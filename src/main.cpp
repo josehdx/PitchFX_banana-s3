@@ -61,7 +61,7 @@ float frozenMag[SAMPLES / 2] = {0};
 float padMagBuffer[SAMPLES / 2] = {0}; // Infinite sustain buffer for Pad Mode
 
 // --- HARDWARE PINS (Core 0) ---
-pin_t pinPB = A0;
+pin_t pinPB = A13;
 pin_t pinPB2 = A2;
 const int CAROUSEL_BUTTON_PIN = 14; 
 const int FREEZE_BUTTON_PIN = 2;    
@@ -809,8 +809,7 @@ void MidiTask(void * pvParameters) {
 
         // --- RESTORED: Actually check if pedals moved! ---
         bool movedA = abs((int)calibratedA - (int)lastMidiA) > 8;
-        bool movedB = abs((int)calibratedB - (int)lastMidiB) > 8; 
-
+        bool movedB = false;
         if (movedA || movedB) {
             if (isScreenOff) turnScreenOn(); 
             lastScreenActivityTime = millis(); 
@@ -961,7 +960,7 @@ void setup() {
 
     // --- OVERRIDES REMOVED: Hardware pedals are completely active! ---
     // pinMode(pinPB, INPUT_PULLUP);  
-    // pinMode(pinPB2, INPUT_PULLUP); 
+    pinMode(pinPB2, INPUT_PULLUP); 
     
     FilteredAnalog<>::setupADC();
     Control_Surface >> pipes >> btmidi;
