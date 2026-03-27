@@ -809,6 +809,7 @@ struct DebouncedButton {
 void MidiTask(void * pvParameters) {
     static analog_t lastMidiA = 8192;
     static analog_t lastMidiB = 8192; 
+    static bool lastBtState = false; // Added to track BT connection changes
 
     static DebouncedButton btnCar(CAROUSEL_BUTTON_PIN);
     static DebouncedButton btnFreeze(FREEZE_BUTTON_PIN);
@@ -832,13 +833,22 @@ void MidiTask(void * pvParameters) {
     for(;;) {
         Control_Surface.loop();
 
+        // --- BT STATE TRACKING ---
+        bool currentBtState = btmidi.isConnected();
+        if (currentBtState != lastBtState) {
+            lastBtState = currentBtState;
+            forceUIUpdate = true;
+            if (isScreenOff) turnScreenOn();
+            lastActivityTime = millis();
+        }
+
         // 1. Only Bluetooth connection status prevents the controller to sleep
-        if (btmidi.isConnected()) {
+        if (currentBtState) {
             lastActivityTime = millis(); 
         }
 
         // 2. Light Sleep Trigger
-        if (!btmidi.isConnected() && (millis() - lastActivityTime > LIGHT_SLEEP_TIMEOUT)) {
+        if (!currentBtState && (millis() - lastActivityTime > LIGHT_SLEEP_TIMEOUT)) {
             goToLightSleep();
         }
 
@@ -922,15 +932,18 @@ void MidiTask(void * pvParameters) {
             int diffB = abs((int)calibratedB - (int)lastMidiB);
             
             // THRESHOLD DETECTION: This logic triggers waking and updates timers
+            // Commented out to prevent noisy floating pins from waking the screen
+            /*
             if (diffA > 256 || diffB > 256) {
                 if (isScreenOff) turnScreenOn();
                 lastScreenActivityTime = millis();
                 forceUIUpdate = true;
             }
+            */
 
             // ACTIVE MODE
-            bool movedA = diffA > 8;
-            bool movedB = false; // PB2 is forced OFF and will be completely ignored
+            bool movedA = false; // diffA > 8; // PB1 forced OFF
+            bool movedB = false; // PB2 forced OFF
             
             if (movedA || movedB) {
                 if (movedA) { 
