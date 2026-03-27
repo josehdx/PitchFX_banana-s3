@@ -101,7 +101,7 @@ const float LATENCY_WINDOWS[] = {512.0f, 1024.0f, 2048.0f, 4096.0f};
 unsigned long lastActivityTime = 0;       
 unsigned long lastScreenActivityTime = 0;
 const unsigned long LIGHT_SLEEP_TIMEOUT = 60000; 
-const unsigned long SCREEN_OFF_TIMEOUT = 65000;  
+const unsigned long SCREEN_OFF_TIMEOUT = 120000;  
 bool isScreenOff = false;
 volatile bool wakeupPending = false; // Added to trigger async boot
 
@@ -931,19 +931,15 @@ void MidiTask(void * pvParameters) {
             int diffA = abs((int)calibratedA - (int)lastMidiA);
             int diffB = abs((int)calibratedB - (int)lastMidiB);
             
-            // THRESHOLD DETECTION: This logic triggers waking and updates timers
-            // Commented out to prevent noisy floating pins from waking the screen
-            /*
-            if (diffA > 256 || diffB > 256) {
+            // THRESHOLD DETECTION: Only PB1 (diffA) can wake the screen now
+            if (diffA > 256) {
                 if (isScreenOff) turnScreenOn();
                 lastScreenActivityTime = millis();
-                forceUIUpdate = true;
             }
-            */
 
             // ACTIVE MODE
-            bool movedA = false; // diffA > 8; // PB1 forced OFF
-            bool movedB = false; // PB2 forced OFF
+            bool movedA = diffA > 8;
+            bool movedB = false; // PB2 is forced OFF and will be completely ignored
             
             if (movedA || movedB) {
                 if (movedA) { 
