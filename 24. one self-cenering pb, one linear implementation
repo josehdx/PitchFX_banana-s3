@@ -58,7 +58,7 @@ float prevSynthesisPhase[SAMPLES / 2];
 volatile float pitchShiftFactor = 1.0; 
 volatile bool isFrozen = false;
 float frozenMag[SAMPLES / 2] = {0};
-float padMagBuffer[SAMPLES / 2] = {0}; // Infinite sustain buffer for Pad Mode
+float padMagBuffer[SAMPLES / 2] = {0}; 
 
 // --- HARDWARE PINS (Core 0) ---
 pin_t pinPB = A13;
@@ -79,7 +79,7 @@ unsigned long bootPressedTime = 0;
 unsigned long intervalButtonPressedTime = 0;
 
 // --- INDEPENDENT EFFECT MEMORY BANKS ---
-int activeEffectMode = 0; // 0=WHAMMY, 1=FREEZE, 2=FEEDBACK, 3=HARMONY, 4=CAPO, 5=SYNTH, 6=PAD
+int activeEffectMode = 0; 
 
 float effectMemory[8] = { 
     12.0f,  // 0: Whammy TOE 
@@ -107,30 +107,25 @@ MIDI_PipeFactory<4> pipes;
 Bank<16> bankChannel;
 FilteredAnalog<12, 2, uint32_t, uint32_t> filterPB = pinPB;
 FilteredAnalog<12, 2, uint32_t, uint32_t> filterPB2 = pinPB2;
+
+// Trackers for the software hysteresis and UI
 uint16_t lastMidiSent = 8192;
 volatile uint16_t currentPB1 = 8192;
 volatile uint16_t currentPB2 = 8192;
 volatile uint16_t currentCC11 = 0;
 
-// --- NEW: INDEPENDENT DUAL CALIBRATION VARIABLES ---
+// --- PB2 CALIBRATION VARIABLES (Self-Centering) ---
 double PBdeadzoneMultiplier = 14;
 double PBdeadzoneMinimum = 950;
 double PBdeadzoneMaximum = 1600;
-analog_t PBminimumValue = 0;
-analog_t PBmaximumValue = 16383;
-
-// PB1 specific
-analog_t PBcenter1 = 8192;
-analog_t PBdeadzone1 = PBdeadzoneMinimum;
-bool PBwasOffCenter1 = false;
-
-// PB2 specific
 analog_t PBcenter2 = 8192;
 analog_t PBdeadzone2 = PBdeadzoneMinimum;
 bool PBwasOffCenter2 = false;
+analog_t PBminimumValue = 0;
+analog_t PBmaximumValue = 16383;
 
-// --- NEW: DYNAMIC MAPPING FUNCTION ---
-analog_t map_PB(analog_t raw, analog_t center, analog_t deadzone, bool &offCenterFlag) {
+// --- PB2 DEADZONE MAPPING FUNCTION ---
+analog_t map_PB_deadzone(analog_t raw, analog_t center, analog_t deadzone, bool &offCenterFlag) {
     raw = constrain(raw, PBminimumValue, PBmaximumValue);
     if (raw <= PBminimumValue + 150) { offCenterFlag = true; return 0; }
     if (raw >= PBmaximumValue - 150) { offCenterFlag = true; return 16383; }
@@ -172,41 +167,26 @@ void goToLightSleep() {
     Serial.println("System Woken Up!");
 }
 
-// --- NEW: INDEPENDENT DUAL CALIBRATION LOGIC ---
-void calibrateCenterAndDeadzone() {
-  Serial.println("Calibrating Center and Deadzones for PB1 and PB2...");
-  for(int i=0; i<50; i++) { filterPB.update(); filterPB2.update(); delay(1); }
+// --- PB2 BOOT CALIBRATION ---
+void calibratePB2() {
+  Serial.println("Calibrating Center and Deadzone for PB2...");
+  for(int i=0; i<50; i++) { filterPB2.update(); delay(1); }
   
   int iNumberOfSamples = 750;
-  
-  analog_t calibPBLow1 = 16383; analog_t calibPBHigh1 = 0; long lSampleSumPB1 = 0;
-  analog_t calibPBLow2 = 16383; analog_t calibPBHigh2 = 0; long lSampleSumPB2 = 0;
+  analog_t calibPBLow2 = 16383; 
+  analog_t calibPBHigh2 = 0; 
+  long lSampleSumPB2 = 0;
 
   for (int iSample = 1; iSample <= iNumberOfSamples; iSample++) {
-    filterPB.update(); 
     filterPB2.update(); 
-
-    // Process PB1
-    analog_t raw12_1 = filterPB.getValue();
-    analog_t calibPB1 = map(raw12_1, 0, 4095, 0, 16383); 
-    lSampleSumPB1 += calibPB1;
-    if (calibPB1 < calibPBLow1) { calibPBLow1 = calibPB1; } 
-    if (calibPB1 > calibPBHigh1) { calibPBHigh1 = calibPB1; } 
-
-    // Process PB2
     analog_t raw12_2 = filterPB2.getValue();
     analog_t calibPB2 = map(raw12_2, 0, 4095, 0, 16383); 
     lSampleSumPB2 += calibPB2;
     if (calibPB2 < calibPBLow2) { calibPBLow2 = calibPB2; } 
     if (calibPB2 > calibPBHigh2) { calibPBHigh2 = calibPB2; } 
-
     delay(1);
   }
   
-  // Assign independent centers and deadzones
-  PBcenter1 = lSampleSumPB1 / iNumberOfSamples;
-  PBdeadzone1 = (analog_t)constrain(((calibPBHigh1 - calibPBLow1) * PBdeadzoneMultiplier), PBdeadzoneMinimum, PBdeadzoneMaximum);
-
   PBcenter2 = lSampleSumPB2 / iNumberOfSamples;
   PBdeadzone2 = (analog_t)constrain(((calibPBHigh2 - calibPBLow2) * PBdeadzoneMultiplier), PBdeadzoneMinimum, PBdeadzoneMaximum);
 }
@@ -322,11 +302,10 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
             bool is_transient = (current_energy > 0.005f) && (current_energy > prev_energy * 5.0f);
             prev_energy = current_energy;
 
-            // --- SYNTH PRE-PROCESSING: HARD CLIPPING ---
             if (_synth) {
                 for (int i = 0; i < HOP_SIZE; i++) {
                     float val = (float)in_block[i] / 8388608.0f;
-                    val *= 30.0f; // Extreme gain for fuzz square wave
+                    val *= 30.0f; 
                     if (val > 0.8f) val = 0.8f;
                     if (val < -0.8f) val = -0.8f;
                     in_block[i] = (int32_t)(val * 8388608.0f);
@@ -354,10 +333,8 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                 float re = fft_buffer[i * 2], im = fft_buffer[i * 2 + 1];
                 float liveMag = fast_mag(re, im);
                 
-                // SYNTH LPF: Remove harsh high-end digital fizz
                 if (_synth && i > (SAMPLES / 2) * 0.15f) liveMag *= 0.1f;
 
-                // PAD BUFFER: Infinite sustain accumulation
                 if (_pad) padMagBuffer[i] = (padMagBuffer[i] * 0.92f) + (liveMag * 0.15f);
                 else padMagBuffer[i] = 0.0f;
 
@@ -391,7 +368,6 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                     prevAnalysisPhase[i] = phase; 
                 }
                 
-                // MAIN PATH (Dry for Pad/Harmonizer, Shifted for Synth/Whammy)
                 float mainFactor = (_harmonizer || _pad) ? 1.0f : _pitchFactor;
                 int targetBin = (int)((i * mainFactor) + 0.5f);
                 if (targetBin < SAMPLES / 2) {
@@ -405,7 +381,6 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                     prevSynthesisPhase[targetBin] = newPhase[targetBin];
                 }
 
-                // PAD PATH
                 if (_pad) {
                     int padTargetBin = (int)((i * _pitchFactor) + 0.5f);
                     if (padTargetBin < SAMPLES / 2) {
@@ -420,7 +395,6 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                     }
                 }
 
-                // FEEDBACK PATH
                 if (_feedback > 0.0f) {
                     float fbFactor = _pitchFactor * (1.0f + _feedback); 
                     int fbTargetBin = (int)((i * fbFactor) + 0.5f);
@@ -436,7 +410,6 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
                     }
                 }
 
-                // HARMONY PATH
                 if (_harmonizer && fabsf(_pitchFactor - 1.0f) > 0.001f) {
                     int harmTargetBin = (int)((i * _pitchFactor) + 0.5f);
                     if (harmTargetBin < SAMPLES / 2) {
@@ -462,7 +435,6 @@ void IRAM_ATTR AudioDSPTask(void * pvParameters) {
 
             for (int i = 0; i < SAMPLES; i++) { ola_buffer[i] += fft_buffer[i * 2]; }
 
-            // --- DYNAMIC HEADROOM MANAGEMENT ---
             float dynamicHeadroom = 1.0f; 
             if (_synth) dynamicHeadroom = 0.60f;
             else if (_pad) dynamicHeadroom = 0.50f;
@@ -794,22 +766,34 @@ void MidiTask(void * pvParameters) {
             if (isScreenOff) turnScreenOn();   
         }
     
+        // --- 1. READ RAW VALUES ---
         filterPB.update();
         filterPB2.update();
+        analog_t raw12_A = filterPB.getValue();
+        analog_t raw12_B = filterPB2.getValue();
 
-        analog_t raw14_A = map(filterPB.getValue(), 0, 4095, 0, 16383);
-        analog_t raw14_B = map(filterPB2.getValue(), 0, 4095, 0, 16383);
+        // --- 2. PROCESS PB1 (Standard Expression Pedal with Margins) ---
+        const int ADC_MIN = 40;   // Shave bottom to hit 0
+        const int ADC_MAX = 4055; // Shave top to hit 16383
+        analog_t constrained_A = constrain(raw12_A, ADC_MIN, ADC_MAX);
+        analog_t calibratedA = map(constrained_A, ADC_MIN, ADC_MAX, 0, 16383);
 
-        // --- RESTORED: Map using independent variables for perfect alignment! ---
-        analog_t calibratedA = map_PB(raw14_A, PBcenter1, PBdeadzone1, PBwasOffCenter1);
-        analog_t calibratedB = map_PB(raw14_B, PBcenter2, PBdeadzone2, PBwasOffCenter2);
+        // --- 3. PROCESS PB2 (Self-Centering Joystick with Deadzone) ---
+        analog_t raw14_B = map(raw12_B, 0, 4095, 0, 16383);
+        analog_t calibratedB = map_PB_deadzone(raw14_B, PBcenter2, PBdeadzone2, PBwasOffCenter2);
 
+        // Update globals for the screen
         currentPB1 = calibratedA;
         currentPB2 = calibratedB;
 
-        // --- RESTORED: Actually check if pedals moved! ---
-        bool movedA = abs((int)calibratedA - (int)lastMidiA) > 8;
-        bool movedB = false;
+        // --- 4. SOFTWARE HYSTERESIS & TESTING OVERRIDE ---
+        bool movedA = abs((int)calibratedA - (int)lastMidiA) > 32; 
+        
+        // FORCE PB2 OFF FOR TESTING:
+        bool movedB = false; 
+        // WHEN READY TO ENABLE PB2, DELETE 'false' AND UNCOMMENT THIS:
+        // bool movedB = abs((int)calibratedB - (int)lastMidiB) > 32; 
+
         if (movedA || movedB) {
             if (isScreenOff) turnScreenOn(); 
             lastScreenActivityTime = millis(); 
@@ -818,12 +802,13 @@ void MidiTask(void * pvParameters) {
             pitchShiftFactor = pitchShiftLUT[constrain(activeMidi, 0, 16383)];
             Control_Surface.sendPitchBend(Channel_1, activeMidi);
 
-            lastMidiA = calibratedA;
-            lastMidiB = calibratedB;
+            if (movedA) lastMidiA = calibratedA;
+            if (movedB) lastMidiB = calibratedB;
             lastMidiSent = activeMidi;
             
             forceUIUpdate = true; 
         }
+
         vTaskDelay(pdMS_TO_TICKS(5)); 
     } 
 } 
@@ -958,8 +943,7 @@ void setup() {
     pinMode(FREEZE_BUTTON_PIN, INPUT_PULLUP); 
     pinMode(0, INPUT_PULLUP); 
 
-    // --- OVERRIDES REMOVED: Hardware pedals are completely active! ---
-    // pinMode(pinPB, INPUT_PULLUP);  
+    // CLAMP PB2 FOR TESTING
     pinMode(pinPB2, INPUT_PULLUP); 
     
     FilteredAnalog<>::setupADC();
@@ -971,7 +955,11 @@ void setup() {
     Control_Surface.begin();
 
     init_i2s_modern();
-    calibrateCenterAndDeadzone();
+    
+    // CALIBRATE PB2 ON BOOT
+    calibratePB2();
+
+    // Set an initial stable pitch value
     Control_Surface.sendPitchBend(Channel_1, 8192);
     lastMidiSent = 8192;
     
