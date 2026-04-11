@@ -1,0 +1,5 @@
+            bool movedA = diffA > 64; 
+            //bool movedB = diffB > 64; 
+
+            //bool movedA = false; // PB1 is forced OFF and will be completely ignored
+            bool movedB = false; // PB2 is forced OFF and will be completely ignored;

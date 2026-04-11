@@ -146,18 +146,17 @@ BluetoothMIDI_Interface btmidi;
 USBMIDI_Interface usbmidi;
 MIDI_PipeFactory<4> pipes;
 
-// --- PB2 DEADZONE MAPPING FUNCTION (From file 24) ---
+// --- PB2 DEADZONE MAPPING FUNCTION ---
 analog_t map_PB_deadzone(analog_t raw, analog_t center, analog_t deadzone, bool &offCenterFlag) {
     raw = constrain(raw, PBminimumValue, PBmaximumValue);
     if (raw <= PBminimumValue + 150) { offCenterFlag = true; return 0; }
     if (raw >= PBmaximumValue - 150) { offCenterFlag = true; return 16383; }
-    if (raw <= center - deadzone) { offCenterFlag = true;
-        return map(raw, PBminimumValue, center - deadzone, 0, 8191); 
-    }
-    else if (raw >= center + deadzone) { offCenterFlag = true;
-        return map(raw, center + deadzone, PBmaximumValue, 8191, 16383); 
-    }
-    else { return 8192; }
+    
+    int r = (int)raw; int c = (int)center; int d = (int)deadzone;
+
+    if (r <= c - d) { offCenterFlag = true; return map(r, (int)PBminimumValue, c - d, 0, 8191); }
+    else if (r >= c + d) { offCenterFlag = true; return map(r, c + d, (int)PBmaximumValue, 8191, 16383); }
+    else { offCenterFlag = false; return 8192; }
 }
 
 void calibratePB2() {
@@ -180,6 +179,7 @@ void calibratePB2() {
   }
   
   PBcenter2 = lSampleSumPB2 / iNumberOfSamples;
+  if (PBcenter2 < 2000 || PBcenter2 > 14000) PBcenter2 = 8192;
   PBdeadzone2 = (analog_t)constrain(((calibPBHigh2 - calibPBLow2) * PBdeadzoneMultiplier), PBdeadzoneMinimum, PBdeadzoneMaximum);
 }
 
@@ -224,7 +224,7 @@ void goToLightSleep() {
     lastActivityTime = millis(); lastScreenActivityTime = millis();
 }
 
-// --- CUBIC HERMITE INTERPOLATION ENGINE (Zero Aliasing) ---
+// --- CUBIC HERMITE INTERPOLATION ENGINE ---
 inline float IRAM_ATTR getHermiteSample(float tapPos, float* buffer, int writeIdx) {
     int iTap = (int)tapPos;
     float frac = tapPos - iTap;
@@ -768,34 +768,44 @@ void MidiTask(void * pvParameters) {
             }
         }
 
-        // --- PRESERVED PB LOGIC FROM FILE 24 WITH BOTH PBS ENABLED ---
         filterPB.update(); filterPB2.update(); 
         bool isGhostButtonActive = (digitalRead(BOOT_SENSE_PIN) == LOW);
 
         if (!isGhostButtonActive) {
+            // Highly aggressive Exponential Moving Average (EMA) 
+            // 95% history, 5% new reading to completely kill midpoint electrical noise
+            static float smoothRawA = -1.0f;
+            static float smoothRawB = -1.0f;
+            
             analog_t raw12_A = filterPB.getValue();
             analog_t raw12_B = filterPB2.getValue();
 
+            if (smoothRawA < 0) smoothRawA = raw12_A;
+            if (smoothRawB < 0) smoothRawB = raw12_B;
+
+            smoothRawA = smoothRawA * 0.95f + (float)raw12_A * 0.05f;
+            smoothRawB = smoothRawB * 0.95f + (float)raw12_B * 0.05f;
+
             const int ADC_MIN = 40;
             const int ADC_MAX = 4055;
-            analog_t constrained_A = constrain(raw12_A, ADC_MIN, ADC_MAX);
+            analog_t constrained_A = constrain((int)smoothRawA, ADC_MIN, ADC_MAX);
             analog_t calibratedA = map(constrained_A, ADC_MIN, ADC_MAX, 0, 16383);
 
-            analog_t raw14_B = map(raw12_B, 0, 4095, 0, 16383);
+            // --- EXTREME LIMIT CLAMP FOR PB1 ---
+            if (calibratedA < 150) calibratedA = 0;
+            if (calibratedA > 16233) calibratedA = 16383;
+
+            analog_t raw14_B = map((int)smoothRawB, 0, 4095, 0, 16383);
             analog_t calibratedB = map_PB_deadzone(raw14_B, PBcenter2, PBdeadzone2, PBwasOffCenter2);
             
-            // PB1 and PB2 fully enabled with a hysteresis of 8
             int diffA = abs((int)calibratedA - (int)lastMidiA);
             int diffB = abs((int)calibratedB - (int)lastMidiB);
-            
 
-            //pin_t pinPB2 = 2; is the one with self-centering logic
-
-            bool movedA = diffA > 8; 
-            //bool movedB = diffB > 8; 
+            bool movedA = diffA > 64; 
+            //bool movedB = diffB > 64; 
 
             //bool movedA = false; // PB1 is forced OFF and will be completely ignored
-            bool movedB = false; // PB2 is forced OFF and will be completely ignored;   
+            bool movedB = false; // PB2 is forced OFF and will be completely ignored;
             
             if (movedA || movedB) {
                 if (isScreenOff) turnScreenOn();
